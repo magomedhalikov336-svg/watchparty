@@ -66,6 +66,14 @@ input::placeholder{color:rgba(255,255,255,.2)}
 .source-tags{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:4px}
 .tag{background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:20px;padding:4px 12px;font-size:11px;color:var(--muted)}
 
+/* Tap-to-watch overlay */
+.tap-overlay{position:absolute;inset:0;background:rgba(0,0,0,.75);z-index:30;display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;cursor:pointer;backdrop-filter:blur(4px)}
+.tap-overlay.visible{display:flex}
+.tap-icon{width:72px;height:72px;border-radius:50%;background:linear-gradient(135deg,var(--blue),var(--purple));display:flex;align-items:center;justify-content:center;font-size:28px;box-shadow:0 0 40px rgba(0,200,240,.4);animation:tapPulse 2s ease-in-out infinite}
+.tap-label{color:#fff;font-size:15px;font-weight:600}
+.tap-sub{color:rgba(255,255,255,.45);font-size:12px}
+@keyframes tapPulse{0%,100%{transform:scale(1);box-shadow:0 0 40px rgba(0,200,240,.4)}50%{transform:scale(1.08);box-shadow:0 0 60px rgba(0,200,240,.7)}}
+
 /* Controls (html5 only) */
 .controls{position:absolute;bottom:0;left:0;right:0;background:linear-gradient(to top,rgba(0,0,0,.85) 0%,transparent 100%);padding:20px 14px 12px;transition:opacity .25s;z-index:10}
 .player-wrap:not(:hover) .controls.visible{opacity:1}
@@ -237,6 +245,13 @@ input::placeholder{color:rgba(255,255,255,.2)}
 
       <!-- Countdown overlay -->
       <div class="sync-countdown" id="sync-countdown">3</div>
+
+      <!-- Tap-to-watch overlay (mobile autoplay unlock) -->
+      <div class="tap-overlay" id="tap-overlay" onclick="unlockAutoplay()">
+        <div class="tap-icon">▶</div>
+        <div class="tap-label">Нажми чтобы смотреть</div>
+        <div class="tap-sub">Браузер требует касания для воспроизведения</div>
+      </div>
     </div>
 
     <!-- Reactions -->
@@ -282,7 +297,42 @@ let myUsername = '', myRoomId = '', isHost = false
 let ignoreVideoEvent = false, ignoreTimer = null
 let currentMode = 'none' // 'html5' | 'youtube' | 'iframe'
 let ytPlayer = null, ytReady = false, ytProgressInterval = null
+let autoplayUnlocked = false
+let pendingPlay = null // { currentTime, serverTime } queued while locked
 const DESYNC = 2
+
+// ===== AUTOPLAY UNLOCK =====
+function showTapOverlay(){
+  if(isHost||autoplayUnlocked) return
+  document.getElementById('tap-overlay').classList.add('visible')
+}
+function unlockAutoplay(){
+  if(autoplayUnlocked) return
+  autoplayUnlocked = true
+  document.getElementById('tap-overlay').classList.remove('visible')
+  // Unlock HTML5 video element
+  const v = document.getElementById('video-html')
+  if(v.src){
+    v.muted = true
+    v.play().then(()=>{ v.pause(); v.muted = false }).catch(()=>{})
+  }
+  // Unlock YouTube
+  if(ytPlayer && ytReady){
+    try{ ytPlayer.mute(); ytPlayer.playVideo(); setTimeout(()=>{ ytPlayer.pauseVideo(); ytPlayer.unMute() },300) }catch(e){}
+  }
+  // Apply any queued play command
+  if(pendingPlay){
+    const {currentTime, serverTime} = pendingPlay
+    pendingPlay = null
+    const exp = currentTime + (Date.now()-serverTime)/2000
+    if(currentMode==='html5'){
+      setIgnore(); if(Math.abs(video.currentTime-exp)>DESYNC) video.currentTime=exp
+      video.play().catch(()=>{})
+    } else if(currentMode==='youtube'&&ytPlayer&&ytReady){
+      try{ setIgnore(500); if(Math.abs(ytPlayer.getCurrentTime()-exp)>DESYNC) ytPlayer.seekTo(exp,true); ytPlayer.playVideo() }catch(e){}
+    }
+  }
+}
 
 // ===== AVATAR =====
 const COLORS = ['linear-gradient(135deg,#00c8f0,#0066aa)','linear-gradient(135deg,#b84ef0,#7700cc)','linear-gradient(135deg,#f0285a,#aa0033)','linear-gradient(135deg,#f09000,#aa6000)','linear-gradient(135deg,#30c060,#007730)','linear-gradient(135deg,#5050e0,#2222aa)']
@@ -318,8 +368,10 @@ function enterRoom(){
 // ===== ROOM STATE =====
 socket.on('room-state',({hostId,members,sync})=>{
   setHost(hostId); updateMembers(members)
-  if(sync.videoUrl) activateVideo(sync.videoUrl, false)
-  if(sync.currentTime !== undefined) applySync(sync)
+  if(sync.videoUrl){
+    activateVideo(sync.videoUrl, false)
+    if(sync.isPlaying) pendingPlay={currentTime:sync.currentTime, serverTime:sync.serverTime||Date.now()}
+  }
 })
 socket.on('host',({hostId})=>setHost(hostId))
 socket.on('members',(m)=>updateMembers(m))
@@ -382,6 +434,7 @@ function activateVideo(url, emit){
   }
 
   if(emit) socket.emit('set-video',{videoUrl:url})
+  else showTapOverlay()
 }
 
 function hideAll(){
@@ -499,6 +552,7 @@ function applySync({currentTime,isPlaying,serverTime,videoUrl}){
 
 socket.on('sync',applySync)
 socket.on('play',({currentTime,serverTime})=>{
+  if(!autoplayUnlocked){pendingPlay={currentTime,serverTime};showTapOverlay();return}
   if(currentMode==='html5'){
     const exp=currentTime+(Date.now()-serverTime)/2000
     setIgnore(); if(Math.abs(video.currentTime-exp)>DESYNC)video.currentTime=exp
