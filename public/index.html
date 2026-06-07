@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>WatchParty</title>
+<title>Кинотеатр Нисошки</title>
 <script src="/socket.io/socket.io.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -144,7 +144,7 @@ input::placeholder{color:rgba(255,255,255,.2)}
 
 <!-- LOBBY -->
 <div id="lobby" class="screen active">
-  <div class="logo"><div class="logo-icon">▶</div><div class="logo-name">WatchParty</div></div>
+  <div class="logo"><div class="logo-icon">▶</div><div class="logo-name">Нисошки</div></div>
   <div class="card">
     <h2>Смотреть вместе</h2>
     <p>Создай комнату и поделись ссылкой с другом</p>
@@ -179,7 +179,7 @@ input::placeholder{color:rgba(255,255,255,.2)}
     <div class="player-wrap" id="player-wrap">
 
       <!-- HTML5 video -->
-      <video id="video-html" preload="metadata" style="display:none"></video>
+      <video id="video-html" preload="auto" playsinline style="display:none"></video>
 
       <!-- YouTube / iframe -->
       <div id="yt-player" style="width:100%;height:100%;display:none"></div>
@@ -310,26 +310,26 @@ function unlockAutoplay(){
   if(autoplayUnlocked) return
   autoplayUnlocked = true
   document.getElementById('tap-overlay').classList.remove('visible')
-  // Unlock HTML5 video element
-  const v = document.getElementById('video-html')
-  if(v.src){
-    v.muted = true
-    v.play().then(()=>{ v.pause(); v.muted = false }).catch(()=>{})
-  }
-  // Unlock YouTube
-  if(ytPlayer && ytReady){
-    try{ ytPlayer.mute(); ytPlayer.playVideo(); setTimeout(()=>{ ytPlayer.pauseVideo(); ytPlayer.unMute() },300) }catch(e){}
-  }
-  // Apply any queued play command
+
   if(pendingPlay){
+    // There's a queued play — seek to correct position and start playing
     const {currentTime, serverTime} = pendingPlay
     pendingPlay = null
     const exp = currentTime + (Date.now()-serverTime)/2000
     if(currentMode==='html5'){
-      setIgnore(); if(Math.abs(video.currentTime-exp)>DESYNC) video.currentTime=exp
-      video.play().catch(()=>{})
+      const v = document.getElementById('video-html')
+      setIgnore(); v.currentTime = exp
+      v.play().catch(()=>{})
     } else if(currentMode==='youtube'&&ytPlayer&&ytReady){
-      try{ setIgnore(500); if(Math.abs(ytPlayer.getCurrentTime()-exp)>DESYNC) ytPlayer.seekTo(exp,true); ytPlayer.playVideo() }catch(e){}
+      try{ setIgnore(500); ytPlayer.seekTo(exp,true); ytPlayer.playVideo() }catch(e){}
+    }
+  } else {
+    // No pending play — just unlock the element so future play() calls work
+    if(currentMode==='html5'){
+      const v = document.getElementById('video-html')
+      if(v.src){ v.muted=true; v.play().then(()=>{ v.pause(); v.muted=false }).catch(()=>{}) }
+    } else if(currentMode==='youtube'&&ytPlayer&&ytReady){
+      try{ ytPlayer.mute(); ytPlayer.playVideo(); setTimeout(()=>{ ytPlayer.pauseVideo(); ytPlayer.unMute() },300) }catch(e){}
     }
   }
 }
@@ -535,7 +535,13 @@ function applySync({currentTime,isPlaying,serverTime,videoUrl}){
   if(currentMode==='html5'){
     const latency=(Date.now()-serverTime)/2000
     const expected=currentTime+latency
+    // Always correct position drift, even on mobile
     if(Math.abs(video.currentTime-expected)>DESYNC){setIgnore();video.currentTime=expected}
+    if(!autoplayUnlocked){
+      // Queue play for when user taps; don't attempt play (would be blocked by browser)
+      if(isPlaying) pendingPlay={currentTime,serverTime}
+      return
+    }
     if(isPlaying&&video.paused&&!video.ended){setIgnore();video.play().catch(()=>{})}
     else if(!isPlaying&&!video.paused){setIgnore();video.pause()}
   } else if(currentMode==='youtube'&&ytPlayer&&ytReady){
@@ -543,6 +549,10 @@ function applySync({currentTime,isPlaying,serverTime,videoUrl}){
       const latency=(Date.now()-serverTime)/2000
       const expected=currentTime+latency
       if(Math.abs(ytPlayer.getCurrentTime()-expected)>DESYNC){setIgnore(500);ytPlayer.seekTo(expected,true)}
+      if(!autoplayUnlocked){
+        if(isPlaying) pendingPlay={currentTime,serverTime}
+        return
+      }
       const state=ytPlayer.getPlayerState()
       if(isPlaying&&state!==YT.PlayerState.PLAYING){setIgnore(500);ytPlayer.playVideo()}
       else if(!isPlaying&&state===YT.PlayerState.PLAYING){setIgnore(500);ytPlayer.pauseVideo()}
