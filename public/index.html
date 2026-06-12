@@ -170,7 +170,7 @@ input::placeholder{color:rgba(255,255,255,.2)}
     <!-- URL bar -->
     <div class="url-bar" id="url-bar-host">
       <span style="color:rgba(255,255,255,.3);font-size:13px">🎬</span>
-      <input type="url" id="video-url-input" placeholder="YouTube, ВКонтакте, прямая ссылка на MP4...">
+      <input type="text" id="video-url-input" placeholder="YouTube, ВКонтакте, прямая ссылка на MP4...">
       <button class="load-btn" onclick="loadVideo()">Загрузить</button>
     </div>
     <div class="guest-info" id="url-bar-guest" style="display:none">🎬 Хост управляет видео</div>
@@ -393,20 +393,30 @@ function updateMembers(members){
     </div>`).join('')
 }
 
-// ===== URL DETECTION =====
+// ===== URL DETECTION & CONVERSION =====
+function convertUrl(url){
+  // VK video page → embed
+  const vk=url.match(/vk\.com\/video(-?\d+)_(\d+)/)
+  if(vk) return `https://vk.com/video_ext.php?oid=${vk[1]}&id=${vk[2]}&hd=2`
+  // Rutube page → embed
+  const rt=url.match(/rutube\.ru\/video\/([a-zA-Z0-9]+)/)
+  if(rt) return `https://rutube.ru/play/embed/${rt[1]}/`
+  return url
+}
 function detectType(url){
-  if(/youtube\.com\/watch|youtu\.be\/|youtube\.com\/embed/.test(url)) return 'youtube'
-  if(/\.(mp4|webm|ogg|mov|mkv)(\?|$)/i.test(url)) return 'html5'
+  if(/youtube\.com\/watch|youtu\.be\/|youtube\.com\/embed|youtube\.com\/shorts/.test(url)) return 'youtube'
+  if(/\.(mp4|webm|ogg|mov|mkv|avi)(\?|$)/i.test(url)) return 'html5'
   if(url.startsWith('http')) return 'iframe'
   return 'html5'
 }
 function extractYouTubeId(url){
-  const m=url.match(/(?:v=|youtu\.be\/|embed\/)([a-zA-Z0-9_-]{11})/)
+  const m=url.match(/(?:v=|youtu\.be\/|embed\/|shorts\/)([a-zA-Z0-9_-]{11})/)
   return m?m[1]:null
 }
 
 // ===== ACTIVATE VIDEO =====
-function activateVideo(url, emit){
+function activateVideo(rawUrl, emit){
+  const url=convertUrl(rawUrl.trim())
   hideAll()
   const type=detectType(url)
   currentMode=type
@@ -422,6 +432,7 @@ function activateVideo(url, emit){
     const v=document.getElementById('video-html')
     v.style.display='block'
     v.src=url; v.load()
+    v.onerror=()=>{ showToast('Не удалось загрузить видео. Проверь ссылку.'); hideAll(); document.getElementById('empty-state').style.display='flex' }
     document.getElementById('html5-controls').style.display='block'
     document.getElementById('empty-state').style.display='none'
   } else {
@@ -438,16 +449,29 @@ function activateVideo(url, emit){
 }
 
 function hideAll(){
-  document.getElementById('video-html').style.display='none'
-  document.getElementById('video-html').src=''
-  document.getElementById('yt-player').style.display='none'
-  document.getElementById('video-iframe').style.display='none'
-  document.getElementById('video-iframe').src=''
+  const vh=document.getElementById('video-html')
+  vh.style.display='none'; vh.src=''; vh.onerror=null
+
+  if(ytProgressInterval){clearInterval(ytProgressInterval);ytProgressInterval=null}
+  if(ytPlayer){
+    try{ytPlayer.destroy()}catch(e){}
+    ytPlayer=null; ytReady=false
+    // destroy() removes the element from DOM — re-create it
+    if(!document.getElementById('yt-player')){
+      const d=document.createElement('div')
+      d.id='yt-player'; d.style.cssText='width:100%;height:100%;display:none'
+      const wrap=document.getElementById('player-wrap')
+      wrap.insertBefore(d, document.getElementById('video-iframe'))
+    }
+  }
+  const ytEl=document.getElementById('yt-player')
+  if(ytEl) ytEl.style.display='none'
+
+  const fr=document.getElementById('video-iframe')
+  fr.style.display='none'; fr.src='about:blank'
   document.getElementById('html5-controls').style.display='none'
   document.getElementById('yt-controls').style.display='none'
   document.getElementById('iframe-sync').style.display='none'
-  if(ytProgressInterval){clearInterval(ytProgressInterval);ytProgressInterval=null}
-  if(ytPlayer){try{ytPlayer.destroy()}catch(e){}; ytPlayer=null; ytReady=false}
 }
 
 function loadVideo(){
@@ -463,19 +487,36 @@ socket.on('video-changed',({videoUrl})=>{
 })
 
 // ===== YOUTUBE =====
-function onYouTubeIframeAPIReady(){} // API loaded
+let ytApiReady=false, ytPendingId=null
+
+function onYouTubeIframeAPIReady(){
+  ytApiReady=true
+  if(ytPendingId){const id=ytPendingId;ytPendingId=null;initYouTube(id)}
+}
 
 function initYouTube(videoId){
+  // API not loaded yet — queue it
+  if(!ytApiReady||typeof YT==='undefined'||typeof YT.Player==='undefined'){
+    ytPendingId=videoId; return
+  }
   if(ytPlayer){try{ytPlayer.destroy()}catch(e){}}
   ytPlayer=null; ytReady=false
+  // Ensure element exists (destroy removes it from DOM)
+  if(!document.getElementById('yt-player')){
+    const d=document.createElement('div')
+    d.id='yt-player'; d.style.cssText='width:100%;height:100%;display:block'
+    document.getElementById('player-wrap').insertBefore(d, document.getElementById('video-iframe'))
+  }
   ytPlayer=new YT.Player('yt-player',{
     videoId,
     playerVars:{playsinline:1,controls:0,rel:0,modestbranding:1},
     events:{
       onReady:()=>{ytReady=true},
-      onStateChange:onYTStateChange
+      onStateChange:onYTStateChange,
+      onError:()=>showToast('YouTube: видео недоступно или закрыто для вставки')
     }
   })
+  if(ytProgressInterval)clearInterval(ytProgressInterval)
   ytProgressInterval=setInterval(updateYTProgress, 300)
 }
 
@@ -517,16 +558,17 @@ function ytTogglePlay(){
   }catch(e){}
 }
 
-// YouTube progress bar click
-document.getElementById('yt-progress-wrap').addEventListener('mousedown',e=>{
+// YouTube progress bar — mouse + touch
+function ytSeekFromEvent(e){
   if(!isHost||!ytPlayer||!ytReady) return
+  const clientX=e.touches?e.touches[0].clientX:e.clientX
   const rect=document.getElementById('yt-progress-wrap').getBoundingClientRect()
-  const ratio=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width))
+  const ratio=Math.max(0,Math.min(1,(clientX-rect.left)/rect.width))
   const t=ratio*(ytPlayer.getDuration()||0)
-  setIgnore(500)
-  ytPlayer.seekTo(t,true)
-  socket.emit('seek',{currentTime:t})
-})
+  setIgnore(500); ytPlayer.seekTo(t,true); socket.emit('seek',{currentTime:t})
+}
+document.getElementById('yt-progress-wrap').addEventListener('mousedown',ytSeekFromEvent)
+document.getElementById('yt-progress-wrap').addEventListener('touchstart',e=>{e.preventDefault();ytSeekFromEvent(e)},{passive:false})
 
 // ===== SYNC (HTML5) =====
 const video=document.getElementById('video-html')
@@ -615,10 +657,18 @@ function togglePlay(){if(!isHost)return;if(video.paused)video.play().catch(()=>{
 function fmt(s){if(!s||!isFinite(s))return'0:00';const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=Math.floor(s%60);if(h)return`${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;return`${m}:${String(sec).padStart(2,'0')}`}
 function updateProgress(){const p=video.duration?video.currentTime/video.duration*100:0;document.getElementById('progress-played').style.width=p+'%';document.getElementById('progress-thumb').style.left=p+'%';document.getElementById('time-display').textContent=fmt(video.currentTime)+' / '+fmt(video.duration)}
 const pw=document.getElementById('progress-wrap'); let dragging=false
-function seekTo(e){if(!isHost)return;const r=pw.getBoundingClientRect();video.currentTime=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width))*(video.duration||0)}
+function seekTo(e){
+  if(!isHost)return
+  const clientX=e.touches?e.touches[0].clientX:e.clientX
+  const r=pw.getBoundingClientRect()
+  video.currentTime=Math.max(0,Math.min(1,(clientX-r.left)/r.width))*(video.duration||0)
+}
 pw.addEventListener('mousedown',e=>{if(!isHost)return;dragging=true;seekTo(e)})
+pw.addEventListener('touchstart',e=>{if(!isHost)return;e.preventDefault();dragging=true;seekTo(e)},{passive:false})
 window.addEventListener('mousemove',e=>{if(dragging)seekTo(e)})
+window.addEventListener('touchmove',e=>{if(dragging)seekTo(e)},{passive:true})
 window.addEventListener('mouseup',()=>{dragging=false})
+window.addEventListener('touchend',()=>{dragging=false})
 function setVolume(v){video.volume=v;document.getElementById('vol-icon').textContent=v<0.01?'🔇':v<0.5?'🔉':'🔊'}
 function toggleMute(){video.muted=!video.muted;document.getElementById('vol-icon').textContent=video.muted?'🔇':'🔊'}
 function toggleFullscreen(){const w=document.getElementById('player-wrap');if(!document.fullscreenElement)w.requestFullscreen().catch(()=>{});else document.exitFullscreen()}
